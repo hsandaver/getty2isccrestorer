@@ -1,0 +1,6 @@
+streamlit
+pymarc
+pandas
+numpy
+scikit-image
+plotly
