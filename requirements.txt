@@ -1,6 +1,7 @@
 streamlit
-pymarc
 pandas
 numpy
-scikit-image
 plotly
+scikit-image
+pymarc
+rdflib
