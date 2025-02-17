@@ -1,18 +1,15 @@
 """
-MARC LAB Color Visualizer & Restoration Simulator with Enhanced Fading Simulator
-===============================================================================
+MARC LAB Color Visualizer & Restoration Simulator with Enhanced Fading Simulator and MARC Metadata Enrichment
+============================================================================================================
 
 This Streamlit application is designed for cultural heritage conservation professionals.
-It processes MARC records to extract color terms, matches these terms against a reference CSV
-database of LAB values, visualizes the colors in both 2D and 3D, provides interactive tools 
-for simulating color restoration, and includes an enhanced fading simulator.
-The fading simulator now accepts light intensity, relative humidity, and time parameters
-to compute the color difference (ΔE) and estimate the time required for the color to fade 
-such that ΔE first exceeds 2. Different empirical constants are used for synthetic versus 
-natural dyes.
+It processes MARC records to extract color terms and metadata (including the OCLC number),
+matches these terms against a reference CSV database of LAB values, visualizes the colors in both 2D and 3D,
+provides interactive tools for simulating color restoration and fading, and generates an RDF graph.
+The RDF graph now includes additional MARC record metadata (e.g., the OCLC number) to help users identify the record.
 
 Usage:
-    1. Prepare a MARC (.mrc) file containing color terms in subfield 'b'.
+    1. Prepare a MARC (.mrc) file containing color terms in subfield 'b' and an OCLC number in field "035" (subfield 'a').
     2. Prepare a CSV file with columns (case–sensitive):
          - Color Name
          - L   (Lightness, 0–100)
@@ -20,10 +17,10 @@ Usage:
          - B   (Blue–Yellow)
     3. Upload both files using the Streamlit interface.
     4. Interact with the restoration simulation tools and the enhanced fading simulator.
-    5. Download the generated RDF graph (in Turtle format) linking the MARC record to its color data.
+    5. Download the generated RDF graph (in Turtle format) linking the MARC record to its enriched color data.
 
 Dependencies:
-    - streamlit, pandas, numpy, plotly, skimage, pymarc, rdflib
+    - streamlit, pandas, numpy, plotly, scikit-image, pymarc, rdflib
 """
 
 import streamlit as st
@@ -105,6 +102,7 @@ class LABColor:
 class MARCRecord:
     color_terms: List[str]
     record_id: str = ""
+    oclc: Optional[str] = None  # Store the OCLC number if available
 
 
 # ------------------------------------------------------------------------------
@@ -119,7 +117,9 @@ def parse_marc_with_pymarc(content: bytes) -> MARCRecord:
     
     color_terms = []
     record_id = str(uuid.uuid4())
+    oclc = None
     for record in reader:
+        # Extract color terms from any field containing subfield 'b'
         for field in record.get_fields():
             if 'b' in field:
                 b_values = field.get_subfields('b')
@@ -127,11 +127,20 @@ def parse_marc_with_pymarc(content: bytes) -> MARCRecord:
                     term = value.strip().lower()
                     if term:
                         color_terms.append(term)
+        # Attempt to extract the OCLC number from field "035", subfield 'a'
+        for field in record.get_fields("035"):
+            subfields = field.get_subfields('a')
+            for sub in subfields:
+                if "OCoLC" in sub:
+                    oclc = sub.strip()
+                    break
+            if oclc:
+                break
         break  # Process only the first record
 
     if not color_terms:
         raise ValueError("No color terms found in the MARC file.")
-    return MARCRecord(color_terms=color_terms, record_id=record_id)
+    return MARCRecord(color_terms=color_terms, record_id=record_id, oclc=oclc)
 
 
 @st.cache_data(show_spinner=False)
@@ -255,7 +264,7 @@ def compute_delta_e_ciede2000(lab1: LABColor, lab2: LABColor) -> float:
 
 
 def compute_munsell_notation(color: LABColor) -> str:
-    return "5R 4/14"  # Placeholder
+    return "5R 4/14"  # Placeholder implementation
 
 
 def predict_color_deterioration(delta_e: float) -> str:
@@ -274,13 +283,13 @@ def predict_color_deterioration(delta_e: float) -> str:
 def calculate_delta_e_fading(original: LABColor, light: float, humidity: float, time: float, dye_type: str) -> float:
     """
     Calculate the color difference (ΔE) for fading given environmental parameters.
-    Empirical model: ΔE = k * light * humidity * time
+    Empirical model: ΔE = k * light * humidity * time,
     where k is determined by the dye type.
     """
     if dye_type.lower() == 'natural':
-        k = 1e-6  # Natural dyes fade faster (example value)
+        k = 1e-6  # Example constant: natural dyes fade faster
     elif dye_type.lower() == 'synthetic':
-        k = 5e-7  # Synthetic dyes are more stable (example value)
+        k = 5e-7  # Example constant: synthetic dyes are more stable
     else:
         raise ValueError("dye_type must be 'natural' or 'synthetic'")
     
@@ -310,8 +319,7 @@ def time_to_fade(original: LABColor, light: float, humidity: float, dye_type: st
 def format_time(total_hours: float) -> str:
     """
     Convert a time in hours to a string in years, days, hours, and minutes.
-    Assumes:
-        1 year = 365 days, 1 day = 24 hours, 1 hour = 60 minutes.
+    Assumes: 1 year = 365 days, 1 day = 24 hours, 1 hour = 60 minutes.
     """
     total_minutes = int(round(total_hours * 60))
     years = total_minutes // 525600  # 525600 minutes in a year
@@ -572,6 +580,9 @@ def generate_rdf_graph(record: MARCRecord, colors: List[LABColor]) -> Graph:
     g.add((record_uri, RDF.type, EX.MARCRecord))
     g.add((record_uri, RDFS.label, Literal("MARC Record")))
     g.add((record_uri, DCTERMS.created, Literal(datetime.datetime.now().isoformat())))
+    # Add the OCLC number as an identifier if available
+    if record.oclc:
+        g.add((record_uri, DCTERMS.identifier, Literal(record.oclc)))
     
     for color in colors:
         color_uri = URIRef(f"http://example.org/marc/{record.record_id}/color/{color.name.replace(' ', '_')}")
@@ -614,7 +625,7 @@ def main():
     
     with st.expander("📁 File Upload Instructions", expanded=True):
         st.markdown("""
-        **MARC File:** Upload a .mrc file containing color terms in subfield 'b'.  
+        **MARC File:** Upload a .mrc file containing color terms in subfield 'b' and an OCLC number in field "035" (subfield 'a').  
         **CSV File:** Upload a CSV file with columns:  
         - Color Name  
         - L (Lightness, 0–100)  
