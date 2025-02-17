@@ -1,37 +1,26 @@
 """
-MARC LAB Color Visualizer & Restoration Simulator
-====================================================
+MARC LAB Color Visualizer & Restoration Simulator with Enhanced Fading Simulator
+===============================================================================
 
 This Streamlit application is designed for cultural heritage conservation professionals.
 It processes MARC records to extract color terms, matches these terms against a reference CSV
-database of LAB values, visualizes the colors in both 2D and 3D, and provides interactive
-tools for simulating color restoration. In addition, the application generates a linked‐data RDF
-graph (using rdflib) that relates the MARC record to its associated color terms and detailed LAB
-information.
+database of LAB values, visualizes the colors in both 2D and 3D, provides interactive tools 
+for simulating color restoration, and includes an enhanced fading simulator.
+The fading simulator now accepts light intensity, relative humidity, and time parameters
+to compute the color difference (ΔE) and estimate the time required for the color to fade 
+such that ΔE first exceeds 2. Different empirical constants are used for synthetic versus 
+natural dyes.
 
 Usage:
     1. Prepare a MARC (.mrc) file containing color terms in subfield 'b'.
-    2. Prepare a CSV file with the following columns (case–sensitive):
+    2. Prepare a CSV file with columns (case–sensitive):
          - Color Name
-         - L   (Lightness, expected range: 0–100)
-         - A   (Green–Red chromaticity, typically within ~[-128, 127])
-         - B   (Blue–Yellow chromaticity, typically within ~[-128, 127])
+         - L   (Lightness, 0–100)
+         - A   (Green–Red)
+         - B   (Blue–Yellow)
     3. Upload both files using the Streamlit interface.
-    4. Interact with the visualizations, restoration simulation sliders, and optionally adjust LAB
-       values manually.
-    5. Download the generated RDF graph (in Turtle format) which links the MARC record to the
-       extracted color information, complete with LAB values, hexadecimal code, ISCC–NBS category,
-       and (placeholder) Munsell notation.
-       
-Conservation Science Notes:
-    • The use of the CIEDE2000 (ΔE₀₀) color-difference formula is preferred over CIE76 because it
-      accounts for the non–uniformity of the LAB space and is more perceptually accurate. This is
-      critical in conservation where small color differences may signal important material variations.
-    • ISCC–NBS categories, while a simplified color naming system, can provide a useful starting point
-      for describing historic colors; however, limitations exist due to its coarse resolution.
-    • The restoration simulation tool helps conservation professionals estimate whether color
-      adjustments will yield perceptually acceptable matches (e.g., ΔE below ~2 is generally
-      imperceptible under controlled conditions).
+    4. Interact with the restoration simulation tools and the enhanced fading simulator.
+    5. Download the generated RDF graph (in Turtle format) linking the MARC record to its color data.
 
 Dependencies:
     - streamlit, pandas, numpy, plotly, skimage, pymarc, rdflib
@@ -57,7 +46,6 @@ import datetime
 # Constants and Lookup Tables
 # ------------------------------------------------------------------------------
 
-# ISCC-NBS Level 2 sRGB centroids (also used for Level 1) for a basic mapping.
 ISCC_NBS_CENTROIDS = {
     "pink": (230, 134, 151),
     "red": (185, 40, 66),
@@ -88,7 +76,6 @@ ISCC_NBS_CENTROIDS = {
     "black": (43, 41, 43)
 }
 
-# Custom namespace for LAB values and additional properties.
 LABNS = Namespace("http://example.org/lab#")
 EX = Namespace("http://example.org/")
 
@@ -98,61 +85,26 @@ EX = Namespace("http://example.org/")
 
 @dataclass
 class LABColor:
-    """
-    Represents a color in the CIELAB color space.
-    
-    Attributes:
-        name (str): The descriptive name of the color.
-        L (float): Lightness component (expected 0–100).
-        a (float): Chromaticity component (green–red axis).
-        b (float): Chromaticity component (blue–yellow axis).
-    
-    Methods:
-        to_rgb: Converts the LAB color to an sRGB tuple.
-        to_hex: Converts the LAB color to a hexadecimal string.
-    """
     name: str
     L: float
     a: float
     b: float
 
     def to_rgb(self) -> Tuple[int, int, int]:
-        """
-        Convert LAB values to sRGB using the CIELAB color space.
-
-        Utilizes skimage.color.lab2rgb which performs gamma correction.
-        The resulting values are scaled to [0, 255] and clipped to ensure validity.
-        
-        Returns:
-            Tuple[int, int, int]: The sRGB color as a tuple.
-        """
         lab_array = np.array([[[self.L, self.a, self.b]]])
         rgb_array = color.lab2rgb(lab_array)
         rgb = np.clip(rgb_array[0, 0] * 255, 0, 255).astype(int)
         return tuple(rgb.tolist())
 
     def to_hex(self) -> str:
-        """
-        Convert the LAB color to a hexadecimal color code.
-        
-        Returns:
-            str: The hex color string.
-        """
         rgb = self.to_rgb()
         return '#{:02x}{:02x}{:02x}'.format(rgb[0], rgb[1], rgb[2])
 
 
 @dataclass
 class MARCRecord:
-    """
-    Represents a simplified MARC record containing extracted color terms.
-    
-    Attributes:
-        color_terms (List[str]): List of color terms extracted from the MARC record.
-        record_id (str): A unique identifier for the record.
-    """
     color_terms: List[str]
-    record_id: str = ""  # Will be generated if not provided
+    record_id: str = ""
 
 
 # ------------------------------------------------------------------------------
@@ -160,22 +112,6 @@ class MARCRecord:
 # ------------------------------------------------------------------------------
 
 def parse_marc_with_pymarc(content: bytes) -> MARCRecord:
-    """
-    Parse a MARC file to extract color terms using pymarc.
-    
-    This function reads the MARC file (provided as bytes) and extracts values
-    from subfield 'b' (assumed to contain descriptive color information). Only the
-    first record in the file is processed.
-    
-    Parameters:
-        content (bytes): The byte content of the MARC file.
-    
-    Returns:
-        MARCRecord: An instance containing the list of extracted color terms and a unique record ID.
-    
-    Raises:
-        ValueError: If the MARC content cannot be read or no color terms are found.
-    """
     try:
         reader = MARCReader(content, to_unicode=True, force_utf8=True)
     except Exception as e:
@@ -200,22 +136,6 @@ def parse_marc_with_pymarc(content: bytes) -> MARCRecord:
 
 @st.cache_data(show_spinner=False)
 def cached_load_csv(csv_bytes: bytes) -> pd.DataFrame:
-    """
-    Load and validate CSV data containing color reference information.
-    
-    This function reads a CSV (provided as bytes) into a DataFrame, validates that the
-    required columns exist, converts LAB columns to numeric, and checks that the values
-    fall within expected ranges (L: 0–100, a and b roughly within -128 to 127).
-    
-    Parameters:
-        csv_bytes (bytes): The CSV file content as bytes.
-    
-    Returns:
-        pd.DataFrame: A validated DataFrame with columns 'Color Name', 'L', 'A', and 'B'.
-    
-    Raises:
-        ValueError: If required columns are missing or LAB values are invalid.
-    """
     try:
         df = pd.read_csv(io.BytesIO(csv_bytes))
     except Exception as e:
@@ -231,7 +151,6 @@ def cached_load_csv(csv_bytes: bytes) -> pd.DataFrame:
     if df[['L', 'A', 'B']].isnull().any().any():
         raise ValueError("One or more LAB value columns contain non-numeric data.")
     
-    # Validate value ranges (L: 0–100; A and B: roughly -128 to 127)
     if not df['L'].between(0, 100).all():
         raise ValueError("Some L values are outside the range 0 to 100.")
     if not df['A'].between(-128, 127).all():
@@ -243,31 +162,10 @@ def cached_load_csv(csv_bytes: bytes) -> pd.DataFrame:
 
 
 class ColorDataManager:
-    """
-    Manages the color reference data loaded from a CSV file.
-    
-    The CSV must contain the following columns:
-      - 'Color Name'
-      - 'L' (Lightness)
-      - 'A' (Green–Red chromaticity)
-      - 'B' (Blue–Yellow chromaticity)
-    
-    Methods:
-        find_color: Retrieves an LABColor for a given color name.
-    """
     def __init__(self, csv_bytes: bytes):
         self.df = cached_load_csv(csv_bytes)
     
     def find_color(self, color_name: str) -> Optional[LABColor]:
-        """
-        Retrieve LABColor information for the specified color name.
-        
-        Parameters:
-            color_name (str): The color term to search for.
-            
-        Returns:
-            Optional[LABColor]: An LABColor instance if found; otherwise, None.
-        """
         matched_row = self.df[self.df['Color Name'] == color_name.lower()]
         if not matched_row.empty:
             return LABColor(
@@ -278,23 +176,12 @@ class ColorDataManager:
             )
         return None
 
+
 # ------------------------------------------------------------------------------
 # ISCC–NBS and Additional Color Analysis Functions
 # ------------------------------------------------------------------------------
 
 def find_nearest_iscc_category(color: LABColor) -> Tuple[str, float]:
-    """
-    Determine the nearest ISCC–NBS color category based on sRGB Euclidean distance.
-    
-    The LABColor is first converted to sRGB, and the Euclidean distance in the sRGB cube is
-    computed against predefined ISCC–NBS centroids.
-    
-    Parameters:
-        color (LABColor): The color to categorize.
-    
-    Returns:
-        Tuple[str, float]: The nearest ISCC–NBS category name and the computed distance.
-    """
     rgb = np.array(color.to_rgb(), dtype=float)
     min_dist = float('inf')
     nearest_category = None
@@ -307,63 +194,28 @@ def find_nearest_iscc_category(color: LABColor) -> Tuple[str, float]:
 
 
 def compute_delta_e(lab1: LABColor, lab2: LABColor) -> float:
-    """
-    Compute the color difference (ΔE) between two LAB colors using the CIE76 formula.
-    
-    CIE76 is simple but does not account for perceptual non–uniformities.
-    
-    Parameters:
-        lab1 (LABColor): First color.
-        lab2 (LABColor): Second color.
-    
-    Returns:
-        float: The CIE76 color difference.
-    """
     return np.sqrt((lab1.L - lab2.L) ** 2 +
                    (lab1.a - lab2.a) ** 2 +
                    (lab1.b - lab2.b) ** 2)
 
 
 def compute_delta_e_ciede2000(lab1: LABColor, lab2: LABColor) -> float:
-    """
-    Compute the color difference (ΔE) using the CIEDE2000 formula.
-    
-    CIEDE2000 offers improved perceptual accuracy over CIE76, an essential factor in
-    conservation where subtle color differences can have significant implications.
-    
-    Parameters:
-        lab1 (LABColor): First color.
-        lab2 (LABColor): Second color.
-    
-    Returns:
-        float: The CIEDE2000 color difference.
-    """
     L1, a1, b1 = lab1.L, lab1.a, lab1.b
     L2, a2, b2 = lab2.L, lab2.a, lab2.b
-
-    # Mean Lightness
     avg_L = (L1 + L2) / 2.0
-
-    # Compute chroma for each color
     C1 = np.sqrt(a1 ** 2 + b1 ** 2)
     C2 = np.sqrt(a2 ** 2 + b2 ** 2)
     avg_C = (C1 + C2) / 2.0
-
-    # Adjust a* values to reduce chroma influence on hue difference
     G = 0.5 * (1 - np.sqrt((avg_C ** 7) / (avg_C ** 7 + 25 ** 7)))
     a1_prime = (1 + G) * a1
     a2_prime = (1 + G) * a2
     C1_prime = np.sqrt(a1_prime ** 2 + b1 ** 2)
     C2_prime = np.sqrt(a2_prime ** 2 + b2 ** 2)
     avg_C_prime = (C1_prime + C2_prime) / 2.0
-
-    # Hue angles (in degrees)
     h1_prime = np.degrees(np.arctan2(b1, a1_prime)) % 360
     h2_prime = np.degrees(np.arctan2(b2, a2_prime)) % 360
-
     delta_L_prime = L2 - L1
     delta_C_prime = C2_prime - C1_prime
-
     if C1_prime * C2_prime == 0:
         delta_h_prime = 0
     else:
@@ -373,7 +225,6 @@ def compute_delta_e_ciede2000(lab1: LABColor, lab2: LABColor) -> float:
         elif dh < -180:
             dh += 360
         delta_h_prime = 2 * np.sqrt(C1_prime * C2_prime) * np.sin(np.radians(dh) / 2)
-
     if C1_prime * C2_prime == 0:
         avg_h_prime = h1_prime + h2_prime
     else:
@@ -383,7 +234,6 @@ def compute_delta_e_ciede2000(lab1: LABColor, lab2: LABColor) -> float:
             avg_h_prime = (h1_prime + h2_prime + 360) / 2
         else:
             avg_h_prime = (h1_prime + h2_prime - 360) / 2
-
     T = (1 - 0.17 * np.cos(np.radians(avg_h_prime - 30)) +
          0.24 * np.cos(np.radians(2 * avg_h_prime)) +
          0.32 * np.cos(np.radians(3 * avg_h_prime + 6)) -
@@ -405,36 +255,10 @@ def compute_delta_e_ciede2000(lab1: LABColor, lab2: LABColor) -> float:
 
 
 def compute_munsell_notation(color: LABColor) -> str:
-    """
-    Compute the closest Munsell Notation for the given LAB color.
-    
-    NOTE: This is a placeholder implementation. In a production environment, you would
-    integrate with a dedicated color science library or use an established conversion
-    algorithm to derive the closest Munsell color.
-    
-    Parameters:
-        color (LABColor): The color to analyze.
-    
-    Returns:
-        str: A string representing the closest Munsell Notation.
-    """
-    # Placeholder: Return a dummy Munsell notation
-    return "5R 4/14"
+    return "5R 4/14"  # Placeholder
 
 
 def predict_color_deterioration(delta_e: float) -> str:
-    """
-    Predict potential color deterioration based on the ΔE value.
-    
-    In conservation, a ΔE below ~2 is generally imperceptible while higher values may indicate
-    significant color differences that could reflect material deterioration.
-    
-    Parameters:
-        delta_e (float): The computed color difference.
-    
-    Returns:
-        str: A message indicating the predicted stability or risk.
-    """
     if delta_e < 2:
         return "Color appears stable."
     elif delta_e < 5:
@@ -444,13 +268,78 @@ def predict_color_deterioration(delta_e: float) -> str:
 
 
 # ------------------------------------------------------------------------------
+# Enhanced Fading Simulator Functions
+# ------------------------------------------------------------------------------
+
+def calculate_delta_e_fading(original: LABColor, light: float, humidity: float, time: float, dye_type: str) -> float:
+    """
+    Calculate the color difference (ΔE) for fading given environmental parameters.
+    Empirical model: ΔE = k * light * humidity * time
+    where k is determined by the dye type.
+    """
+    if dye_type.lower() == 'natural':
+        k = 1e-6  # Natural dyes fade faster (example value)
+    elif dye_type.lower() == 'synthetic':
+        k = 5e-7  # Synthetic dyes are more stable (example value)
+    else:
+        raise ValueError("dye_type must be 'natural' or 'synthetic'")
+    
+    delta_e = k * light * humidity * time
+    return delta_e
+
+
+def time_to_fade(original: LABColor, light: float, humidity: float, dye_type: str, target_delta_e: float = 2.0) -> float:
+    """
+    Estimate the time (in hours) required for the color to fade such that ΔE reaches target_delta_e.
+    Uses the inverted model: time = target_delta_e / (k * light * humidity)
+    """
+    if dye_type.lower() == 'natural':
+        k = 1e-6
+    elif dye_type.lower() == 'synthetic':
+        k = 5e-7
+    else:
+        raise ValueError("dye_type must be 'natural' or 'synthetic'")
+    
+    if light * humidity * k == 0:
+        return float('inf')
+    
+    time_required = target_delta_e / (k * light * humidity)
+    return time_required
+
+
+def format_time(total_hours: float) -> str:
+    """
+    Convert a time in hours to a string in years, days, hours, and minutes.
+    Assumes:
+        1 year = 365 days, 1 day = 24 hours, 1 hour = 60 minutes.
+    """
+    total_minutes = int(round(total_hours * 60))
+    years = total_minutes // 525600  # 525600 minutes in a year
+    rem_minutes = total_minutes % 525600
+    days = rem_minutes // 1440       # 1440 minutes in a day
+    rem_minutes %= 1440
+    hours = rem_minutes // 60
+    minutes = rem_minutes % 60
+
+    parts = []
+    if years > 0:
+        parts.append(f"{years} year{'s' if years != 1 else ''}")
+    if days > 0:
+        parts.append(f"{days} day{'s' if days != 1 else ''}")
+    if hours > 0:
+        parts.append(f"{hours} hour{'s' if hours != 1 else ''}")
+    if minutes > 0:
+        parts.append(f"{minutes} minute{'s' if minutes != 1 else ''}")
+    if not parts:
+        return "0 minutes"
+    return ", ".join(parts)
+
+
+# ------------------------------------------------------------------------------
 # Visualization and UI Utility Functions
 # ------------------------------------------------------------------------------
 
 def apply_custom_css():
-    """
-    Apply custom CSS styling to the Streamlit app to enhance the visual layout.
-    """
     st.markdown(
         """
         <style>
@@ -470,15 +359,6 @@ def apply_custom_css():
 
 
 def display_color_info(color: LABColor):
-    """
-    Render detailed color information along with a visual swatch.
-    
-    Displays the color's LAB values, sRGB representation, hexadecimal code, the nearest
-    ISCC–NBS category (with computed sRGB distance), and the (placeholder) Munsell notation.
-    
-    Parameters:
-        color (LABColor): The color to display.
-    """
     rgb = color.to_rgb()
     hex_color = color.to_hex()
     iscc_category, dist = find_nearest_iscc_category(color)
@@ -553,16 +433,6 @@ def display_color_info(color: LABColor):
 
 
 def plot_lab_3d(original: LABColor, adjusted: LABColor):
-    """
-    Create a 3D scatter plot to visualize the LAB coordinates of the original and adjusted colors.
-    
-    This visualization helps conservation professionals understand the spatial relationships in
-    the perceptually uniform CIELAB space, emphasizing how restoration adjustments shift the color.
-    
-    Parameters:
-        original (LABColor): The original color.
-        adjusted (LABColor): The restoration target color.
-    """
     fig = go.Figure()
     fig.add_trace(go.Scatter3d(
         x=[original.L],
@@ -580,7 +450,6 @@ def plot_lab_3d(original: LABColor, adjusted: LABColor):
         marker=dict(size=8, color=adjusted.to_hex()),
         name="Restoration Target"
     ))
-    # Connecting line illustrating ΔE difference
     fig.add_trace(go.Scatter3d(
         x=[original.L, adjusted.L],
         y=[original.a, adjusted.a],
@@ -602,16 +471,6 @@ def plot_lab_3d(original: LABColor, adjusted: LABColor):
 
 
 def restoration_tools(matched_colors: List[LABColor]):
-    """
-    Provide interactive restoration simulation tools for conservation professionals.
-    
-    Users can adjust LAB values for a restoration target color (via sliders or manual text input)
-    and compare it with the original discovered color. Both CIE76 and CIEDE2000 differences are
-    computed, and a color deterioration prediction is provided based on the ΔE value.
-    
-    Parameters:
-        matched_colors (List[LABColor]): A list of colors matched from the MARC record.
-    """
     st.markdown("## Restoration Simulation Tools")
     st.markdown(
         """
@@ -621,13 +480,11 @@ def restoration_tools(matched_colors: List[LABColor]):
         a ΔE below 2 is typically imperceptible.
         """
     )
-    # Select a color from matched colors
     color_names = [color.name.title() for color in matched_colors]
     selected_name = st.selectbox("Select a color for simulation", color_names)
     original_color = next(c for c in matched_colors if c.name.title() == selected_name)
 
     st.markdown("### Adjust Restoration Target LAB Values")
-    # Option for manual LAB input
     custom_lab_input = st.text_input("Or enter custom LAB values (L, a, b)", value="", 
                                      help="Enter three comma-separated numbers (e.g., 50, 0, 0)")
     if custom_lab_input:
@@ -679,52 +536,54 @@ def restoration_tools(matched_colors: List[LABColor]):
     plot_lab_3d(original_color, adjusted_color)
 
 
+def fading_simulator(matched_colors: List[LABColor]):
+    st.markdown("## Enhanced Fading Simulator")
+    fade_color_names = [color.name.title() for color in matched_colors]
+    selected_fade_name = st.selectbox("Select a color for fading simulation", fade_color_names, key="fading_simulation")
+    original_fade_color = next(c for c in matched_colors if c.name.title() == selected_fade_name)
+    
+    st.markdown("### Environmental Parameters for Fading Simulation")
+    light_intensity = st.number_input("Light Intensity (lux)", min_value=0.0, value=5000.0, step=100.0)
+    humidity = st.slider("Relative Humidity (0 to 1)", min_value=0.0, max_value=1.0, value=0.5, step=0.01)
+    dye_type = st.selectbox("Dye Type", options=["Natural", "Synthetic"])
+    
+    st.markdown("### Fading Simulation")
+    time_exposure = st.slider("Exposure Time (hours)", min_value=0.0, max_value=10000.0, value=1000.0, step=10.0)
+    computed_delta_e = calculate_delta_e_fading(original_fade_color, light_intensity, humidity, time_exposure, dye_type)
+    st.markdown(f"Computed ΔE after {time_exposure} hours: **{computed_delta_e:.2f}**")
+    
+    target_time = time_to_fade(original_fade_color, light_intensity, humidity, dye_type)
+    formatted_time = format_time(target_time)
+    st.markdown(f"Estimated time to reach ΔE of 2: **{formatted_time}**")
+    
+    retest_note = st.text_input("Note: When to re-test for fading (e.g., 'After 6 months')", key="fading_note")
+    if retest_note:
+        st.info(f"Re-test note: {retest_note}")
+
+
 def generate_rdf_graph(record: MARCRecord, colors: List[LABColor]) -> Graph:
-    """
-    Generate an RDF graph representing the extracted MARC record and associated color data.
-    
-    Each MARC record is assigned a unique URI (or uses an existing identifier if present).
-    Each color term is given its own URI, and the following triples are created:
-      - The MARC record is linked to each color term using dcterms:subject.
-      - Each color term is described with its LAB values (using custom predicates),
-        hexadecimal color, and ISCC–NBS category.
-      - The ISCC–NBS term is included as a skos:narrower property under a broader color category.
-    
-    Parameters:
-        record (MARCRecord): The parsed MARC record.
-        colors (List[LABColor]): The list of matched LABColor objects.
-    
-    Returns:
-        Graph: An RDF graph containing the linked color data.
-    """
     g = Graph()
     g.bind("dcterms", DCTERMS)
     g.bind("skos", SKOS)
     g.bind("lab", LABNS)
     g.bind("ex", EX)
     
-    # Create a unique URI for the MARC record
     record_uri = URIRef(f"http://example.org/marc/{record.record_id}")
     g.add((record_uri, RDF.type, EX.MARCRecord))
     g.add((record_uri, RDFS.label, Literal("MARC Record")))
     g.add((record_uri, DCTERMS.created, Literal(datetime.datetime.now().isoformat())))
     
     for color in colors:
-        # Generate a URI for each color term
         color_uri = URIRef(f"http://example.org/marc/{record.record_id}/color/{color.name.replace(' ', '_')}")
         g.add((color_uri, RDF.type, EX.ColorTerm))
         g.add((color_uri, SKOS.prefLabel, Literal(color.name.title())))
-        # Add LAB values using custom properties
         g.add((color_uri, LABNS.hasL, Literal(color.L)))
         g.add((color_uri, LABNS.hasA, Literal(color.a)))
         g.add((color_uri, LABNS.hasB, Literal(color.b)))
         g.add((color_uri, LABNS.hasHex, Literal(color.to_hex())))
-        # Include the nearest ISCC–NBS category
         iscc_category, _ = find_nearest_iscc_category(color)
         g.add((color_uri, SKOS.narrower, Literal(iscc_category.title())))
-        # Add a placeholder for Munsell notation
         g.add((color_uri, LABNS.hasMunsell, Literal(compute_munsell_notation(color))))
-        # Link the MARC record to the color term
         g.add((record_uri, DCTERMS.subject, color_uri))
     
     return g
@@ -735,14 +594,6 @@ def generate_rdf_graph(record: MARCRecord, colors: List[LABColor]) -> Graph:
 # ------------------------------------------------------------------------------
 
 def main():
-    """
-    Main function to run the Streamlit application.
-    
-    This function integrates MARC record parsing, CSV color data lookup, advanced color
-    difference calculations (using both CIE76 and CIEDE2000), linked data (RDF) generation,
-    and interactive restoration simulation tools to support cultural heritage conservation
-    workflows.
-    """
     st.set_page_config(page_title="MARC LAB Color Visualizer & Restoration Simulator", layout="wide")
     apply_custom_css()
     
@@ -753,7 +604,8 @@ def main():
             <p>
                 Welcome, conservation expert! Upload a MARC (.mrc) file and a CSV with LAB values to visualize 
                 discovered colors and assess their historical significance. The app assigns an ISCC–NBS 
-                category via sRGB centroid analysis and offers restoration simulation tools for precise color matching.
+                category via sRGB centroid analysis, offers restoration simulation tools, and now includes
+                an enhanced fading simulator that calculates fading based on light, humidity, and time.
             </p>
         </div>
         """,
@@ -778,10 +630,8 @@ def main():
     
     if uploaded_marc and uploaded_csv:
         try:
-            # Parse MARC file to extract color terms
             marc_content = uploaded_marc.read()
             record_data = parse_marc_with_pymarc(marc_content)
-            # Load CSV color reference data
             csv_bytes = uploaded_csv.read()
             color_manager = ColorDataManager(csv_bytes)
             matched_colors = []
@@ -796,10 +646,9 @@ def main():
                     display_color_info(color_obj)
                 with st.expander("📋 All Color Terms Found"):
                     st.write(", ".join(record_data.color_terms))
-                # Launch restoration simulation tools
                 restoration_tools(matched_colors)
+                fading_simulator(matched_colors)
                 
-                # Generate and offer RDF graph download
                 rdf_graph = generate_rdf_graph(record_data, matched_colors)
                 rdf_data = rdf_graph.serialize(format="turtle")
                 st.download_button(label="Download RDF Graph (Turtle)",
