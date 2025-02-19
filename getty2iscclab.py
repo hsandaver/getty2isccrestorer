@@ -311,7 +311,8 @@ def format_time(total_hours: float) -> str:
 
 class RDFGraphGenerator:
     """
-    Generates an RDF graph enriched with MARC record and color metadata.
+    Generates an RDF graph enriched with MARC record, color metadata,
+    and simulation inputs/outputs.
     """
     def __init__(self) -> None:
         self.graph = Graph()
@@ -320,7 +321,9 @@ class RDFGraphGenerator:
         self.graph.bind("lab", LABNS)
         self.graph.bind("ex", EX)
 
-    def add_record(self, record: MARCRecord, colors: List[LABColor]) -> None:
+    def add_record(self, record: MARCRecord, colors: List[LABColor],
+                   restoration_simulation_data: Optional[dict] = None,
+                   fading_simulation_data: Optional[dict] = None) -> None:
         record_uri = URIRef(f"http://example.org/marc/{record.record_id}")
         self.graph.add((record_uri, RDF.type, EX.MARCRecord))
         self.graph.add((record_uri, RDFS.label, Literal("MARC Record")))
@@ -335,7 +338,7 @@ class RDFGraphGenerator:
             self.graph.add((color_uri, LABNS.hasL, Literal(color.L)))
             self.graph.add((color_uri, LABNS.hasA, Literal(color.a)))
             self.graph.add((color_uri, LABNS.hasB, Literal(color.b)))
-            # Additional triples for the input LAB values
+            # Also record the input LAB values
             self.graph.add((color_uri, LABNS.inputL, Literal(color.L)))
             self.graph.add((color_uri, LABNS.inputA, Literal(color.a)))
             self.graph.add((color_uri, LABNS.inputB, Literal(color.b)))
@@ -344,6 +347,50 @@ class RDFGraphGenerator:
             self.graph.add((color_uri, SKOS.narrower, Literal(iscc_category.title())))
             self.graph.add((color_uri, LABNS.hasMunsell, Literal(compute_munsell_notation(color))))
             self.graph.add((record_uri, DCTERMS.subject, color_uri))
+        
+        # Add restoration simulation data to the RDF
+        if restoration_simulation_data:
+            restoration_uri = URIRef(f"http://example.org/marc/{record.record_id}/simulation/restoration")
+            self.graph.add((restoration_uri, RDF.type, EX.RestorationSimulation))
+            orig_color = restoration_simulation_data.get("original_color")
+            target_color = restoration_simulation_data.get("target_color")
+            delta_e_cie76 = restoration_simulation_data.get("delta_e_cie76")
+            delta_e_ciede2000 = restoration_simulation_data.get("delta_e_ciede2000")
+            deterioration_msg = restoration_simulation_data.get("deterioration_msg")
+            self.graph.add((restoration_uri, LABNS.originalColorL, Literal(orig_color.L)))
+            self.graph.add((restoration_uri, LABNS.originalColorA, Literal(orig_color.a)))
+            self.graph.add((restoration_uri, LABNS.originalColorB, Literal(orig_color.b)))
+            self.graph.add((restoration_uri, LABNS.targetColorL, Literal(target_color.L)))
+            self.graph.add((restoration_uri, LABNS.targetColorA, Literal(target_color.a)))
+            self.graph.add((restoration_uri, LABNS.targetColorB, Literal(target_color.b)))
+            self.graph.add((restoration_uri, LABNS.deltaE_CIE76, Literal(delta_e_cie76)))
+            self.graph.add((restoration_uri, LABNS.deltaE_CIEDE2000, Literal(delta_e_ciede2000)))
+            self.graph.add((restoration_uri, LABNS.deteriorationPrediction, Literal(deterioration_msg)))
+            self.graph.add((record_uri, DCTERMS.hasPart, restoration_uri))
+        
+        # Add fading simulation data to the RDF
+        if fading_simulation_data:
+            fading_uri = URIRef(f"http://example.org/marc/{record.record_id}/simulation/fading")
+            self.graph.add((fading_uri, RDF.type, EX.FadingSimulation))
+            fading_color = fading_simulation_data.get("fading_color")
+            light_intensity = fading_simulation_data.get("light_intensity")
+            humidity = fading_simulation_data.get("humidity")
+            temperature = fading_simulation_data.get("temperature")
+            dye_type = fading_simulation_data.get("dye_type")
+            time_exposure = fading_simulation_data.get("time_exposure")
+            computed_delta_e = fading_simulation_data.get("computed_delta_e")
+            estimated_time = fading_simulation_data.get("estimated_time")
+            self.graph.add((fading_uri, LABNS.fadingColorL, Literal(fading_color.L)))
+            self.graph.add((fading_uri, LABNS.fadingColorA, Literal(fading_color.a)))
+            self.graph.add((fading_uri, LABNS.fadingColorB, Literal(fading_color.b)))
+            self.graph.add((fading_uri, LABNS.lightIntensity, Literal(light_intensity)))
+            self.graph.add((fading_uri, LABNS.humidity, Literal(humidity)))
+            self.graph.add((fading_uri, LABNS.temperature, Literal(temperature)))
+            self.graph.add((fading_uri, LABNS.dyeType, Literal(dye_type)))
+            self.graph.add((fading_uri, LABNS.timeExposure, Literal(time_exposure)))
+            self.graph.add((fading_uri, LABNS.fadingDeltaE, Literal(computed_delta_e)))
+            self.graph.add((fading_uri, LABNS.estimatedTimeToFade, Literal(estimated_time)))
+            self.graph.add((record_uri, DCTERMS.hasPart, fading_uri))
 
     def serialize(self, format: str = "turtle") -> str:
         serialized = self.graph.serialize(format=format)
@@ -561,9 +608,28 @@ def main() -> None:
             target_time = fading_simulator.time_to_fade(original_fade_color, light_intensity, humidity, temperature)
             st.markdown(f"Estimated time to reach ΔE of 2: **{format_time(target_time)}**")
             
+            # Prepare simulation data for RDF export
+            restoration_simulation_data = {
+                "original_color": original_color,
+                "target_color": adjusted_color,
+                "delta_e_cie76": delta_e_cie76,
+                "delta_e_ciede2000": delta_e_ciede2000,
+                "deterioration_msg": deterioration_msg,
+            }
+            fading_simulation_data = {
+                "fading_color": original_fade_color,
+                "light_intensity": light_intensity,
+                "humidity": humidity,
+                "temperature": temperature,
+                "dye_type": dye_type,
+                "time_exposure": time_exposure,
+                "computed_delta_e": computed_delta_e,
+                "estimated_time": format_time(target_time),
+            }
+            
             # RDF Graph Generation
             rdf_generator = RDFGraphGenerator()
-            rdf_generator.add_record(record, matched_colors)
+            rdf_generator.add_record(record, matched_colors, restoration_simulation_data, fading_simulation_data)
             rdf_data = rdf_generator.serialize()
             st.download_button(label="Download RDF Graph (Turtle)",
                                data=rdf_data,
