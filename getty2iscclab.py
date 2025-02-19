@@ -331,9 +331,14 @@ class RDFGraphGenerator:
             color_uri = URIRef(f"http://example.org/marc/{record.record_id}/color/{color.name.replace(' ', '_')}")
             self.graph.add((color_uri, RDF.type, EX.ColorTerm))
             self.graph.add((color_uri, SKOS.prefLabel, Literal(color.name.title())))
+            # Store computed LAB values
             self.graph.add((color_uri, LABNS.hasL, Literal(color.L)))
             self.graph.add((color_uri, LABNS.hasA, Literal(color.a)))
             self.graph.add((color_uri, LABNS.hasB, Literal(color.b)))
+            # Additional triples for the input LAB values
+            self.graph.add((color_uri, LABNS.inputL, Literal(color.L)))
+            self.graph.add((color_uri, LABNS.inputA, Literal(color.a)))
+            self.graph.add((color_uri, LABNS.inputB, Literal(color.b)))
             self.graph.add((color_uri, LABNS.hasHex, Literal(color.to_hex())))
             iscc_category, _ = find_nearest_iscc_category(color)
             self.graph.add((color_uri, SKOS.narrower, Literal(iscc_category.title())))
